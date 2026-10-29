@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+
+<meta
+  name="viewport"
+  content="width=device-width,initial-scale=1,viewport-fit=cover"
+>
+
+<title>浮萍與水位 AR 實驗</title>
+
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+<style>
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family:
+      "Microsoft JhengHei",
+      sans-serif;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  .panel {
+    position: fixed;
+    z-index: 10;
+    left: 10px;
+    right: 10px;
+    max-width: 480px;
+    margin: auto;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 14px;
+    border-radius: 16px;
+    box-shadow: 0 4px 22px #0002;
+  }
+
+  #top {
+    top: max(10px, env(safe-area-inset-top));
+  }
+
+  #bottom {
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  h1 {
+    font-size: 19px;
+    color: #155744;
+    margin: 0 0 7px;
+  }
+
+  p {
+    font-size: 14px;
+    line-height: 1.6;
+    margin: 6px 0;
+  }
+
+  button {
+    background: #176b57;
+    color: white;
+    border: 0;
+    border-radius: 9px;
+    padding: 11px 13px;
+    font: inherit;
+    touch-action: manipulation;
+  }
+
+  button:disabled {
+    background: #888;
+  }
+
+  #start {
+    margin-top: 10px;
+  }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  label {
+    font-weight: bold;
+    color: #155744;
+  }
+
+  input[type="range"] {
+    width: 100%;
+    height: 38px;
+    accent-color: #176b57;
+    touch-action: pan-x;
+  }
+
+  .note {
+    font-size: 12px;
+    color: #666;
+  }
+
+  .row button {
+    flex: 1;
+  }
+
+  #result {
+    min-height: 42px;
+  }
+
+  #levelValue {
+    font-weight: bold;
+  }
+
+  #status {
+    overflow-wrap: anywhere;
+  }
+</style>
+
+<script>
+AFRAME.registerComponent('tank-interaction', {
+  init: function () {
+    this.ready = false;
+    this.depth = 0.50;
+    this.targetDepth = 0.50;
+
+    this.el.addEventListener('model-loaded', () => {
+      try {
+        const mesh = this.el.getObject3D('mesh');
+
+        this.body = mesh.getObjectByName('WaterBody');
+
+        this.surface = mesh.getObjectByName(
+          'WaterSurface'
+        );
+
+        this.plant = mesh.getObjectByName(
+          'DuckweedRoot'
+        );
+
+        const tank = mesh.getObjectByName('TankRoot');
+
+        if (
+          !this.body ||
+          !this.surface ||
+          !this.plant ||
+          !tank
+        ) {
+          throw new Error(
+            '模型缺少互動物件，請使用本次腳本匯出的 ' +
+            'duckweed_tank.glb。'
+          );
+        }
+
+        this.base = Number(
+          tank.userData.water_base ?? 0.12
+        );
+
+        this.minDepth = Number(
+          tank.userData.water_min_depth ?? 0.25
+        );
+
+        this.maxDepth = Number(
+          tank.userData.water_max_depth ?? 0.80
+        );
+
+        // Blender 匯出時已轉為 Y-up。
+        // 水深與浮萍高度皆沿 GLB 的 Y 軸改變。
+        mesh.traverse(obj => {
+          if (!obj.isMesh) return;
+
+          const materials = Array.isArray(obj.material)
+            ? obj.material
+            : [obj.material];
+
+          for (const mat of materials) {
+            if (!mat) continue;
+
+            const alpha = {
+              TankGlass: 0.10,
+              WaterVolume: 0.13,
+              WaterTop: 0.35
+            }[mat.name];
+
+            if (alpha !== undefined) {
+              mat.transparent = true;
+              mat.opacity = alpha;
+              mat.needsUpdate = true;
+            }
+
+            if (mat.transparent || mat.opacity < 1) {
+              mat.depthWrite = false;
+              mat.side = AFRAME.THREE.DoubleSide;
+
+              obj.renderOrder = mat.name.includes(
+                'TankGlass'
+              ) ? 3 : 2;
+            }
+          }
+        });
+
+        this.ready = true;
+
+        this.setLevel(50);
+
+        this.depth = this.targetDepth;
+        this.applyDepth();
+
+        this.el.dataset.tankReady = 'true';
+
+        this.el.emit('tank-ready', {}, false);
+
+      } catch (error) {
+        console.error(error);
+
+        this.el.dataset.tankError = error.message;
+
+        this.el.emit(
+          'tank-error',
+          { message: error.message },
+          false
+        );
+      }
+    });
+  },
+
+  setLevel: function (percent) {
+    if (!this.ready) return;
+
+    const p = Math.min(
+      100,
+      Math.max(0, Number(percent))
+    ) / 100;
+
+    this.targetDepth =
+      this.minDepth +
+      (this.maxDepth - this.minDepth) * p;
+  },
+
+  applyDepth: function () {
+    // 改變水體高度，底部位置保持固定。
+    this.body.position.y = this.base;
+    this.body.scale.y = this.depth;
+
+    // 水面位於水體最上方。
+    this.surface.position.y =
+      this.base + this.depth;
+
+    // 浮萍原點位於水面。
+    // 葉狀體與根跟隨整株升降。
+    this.plant.position.y =
+      this.base + this.depth;
+  },
+
+  tick: function (time, delta) {
+    if (!this.ready) return;
+
+    // 平滑升降，避免水位瞬間跳動。
+    const alpha = 1 - Math.exp(
+      -Math.min(delta || 16, 100) / 140
+    );
+
+    this.depth +=
+      (this.targetDepth - this.depth) * alpha;
+
+    this.applyDepth();
+  }
+});
+</script>
+</head>
+
+<body>
+
+<div id="top" class="panel">
+  <h1>浮萍與水位 AR 實驗</h1>
+
+  <p
+    id="status"
+    role="status"
+    aria-live="polite"
+  >
+    正在載入立體水槽……
+  </p>
+
+  <button id="start" disabled>
+    載入中
+  </button>
+
+  <p class="note">
+    浮萍外形與尺寸為教學放大示意；
+    水位升降為互動模擬。
+  </p>
+</div>
+
+<div id="bottom" class="panel" hidden>
+
+  <div class="row">
+    <label for="level">調整水位</label>
+    <span id="levelValue">50%</span>
+  </div>
+
+  <input
+    id="level"
+    type="range"
+    min="0"
+    max="100"
+    value="50"
+    step="1"
+    aria-label="水位，相對於可調整範圍的百分比"
+  >
+
+  <div class="row">
+    <button data-level="0">低水位</button>
+    <button data-level="50">中水位</button>
+    <button data-level="100">高水位</button>
+  </div>
+
+  <p id="result">
+    試著降低水位，觀察浮萍的位置。
+  </p>
+
+  <div class="row">
+    <button id="rotate">旋轉</button>
+    <button id="view">換角度</button>
+    <button id="reset">重設</button>
+  </div>
+
+  <p class="note">
+    觀察：浮萍是否一直位於水面？
+    根是否固定在槽底？
+  </p>
+</div>
+
+<a-scene
+  mindar-image="
+    imageTargetSrc: ./targets.mind;
+    autoStart: false;
+    uiLoading: no;
+    uiScanning: no;
+    uiError: no;
+  "
+  renderer="
+    colorManagement: true;
+    alpha: true;
+  "
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: false"
+  loading-screen="enabled: false"
+>
+  <a-camera
+    position="0 0 0"
+    look-controls="enabled: false"
+  ></a-camera>
+
+  <a-entity
+    light="type: ambient; intensity: 1.1"
+  ></a-entity>
+
+  <a-entity
+    light="type: directional; intensity: 1.2"
+    position="1 2 3"
+  ></a-entity>
+
+  <a-entity
+    id="target"
+    mindar-image-target="targetIndex: 0"
+  >
+    <a-entity
+      id="spin"
+      position="0 -0.1 0.02"
+    >
+      <a-entity
+        id="tilt"
+        rotation="70 0 0"
+      >
+        <a-entity
+          id="tank"
+          gltf-model="url(./duckweed_tank.glb)"
+          scale="0.52 0.52 0.52"
+          tank-interaction
+        ></a-entity>
+      </a-entity>
+    </a-entity>
+  </a-entity>
+</a-scene>
+
+<script>
+const scene = document.querySelector('a-scene');
+const tank = document.querySelector('#tank');
+
+const status = document.querySelector('#status');
+const start = document.querySelector('#start');
+const bottom = document.querySelector('#bottom');
+
+const level = document.querySelector('#level');
+const value = document.querySelector('#levelValue');
+const result = document.querySelector('#result');
+
+let sceneReady = Boolean(scene.hasLoaded);
+let modelReady = false;
+
+let failed = false;
+let starting = false;
+let running = false;
+
+let angle = 0;
+let viewIndex = 0;
+
+const views = [70, 90, 40];
+
+function ready() {
+  if (failed || running || starting) return;
+
+  if (sceneReady && modelReady) {
+    start.disabled = false;
+    start.textContent = '啟動 AR 鏡頭';
+
+    status.textContent =
+      '水槽已載入。啟動鏡頭後，請掃描指定圖卡。';
+  }
+}
+
+function fail(message) {
+  failed = true;
+  running = false;
+  starting = false;
+
+  status.textContent = message;
+
+  start.hidden = false;
+  start.disabled = true;
+  start.textContent = '請修正後重新整理';
+
+  bottom.hidden = true;
+
+  try {
+    scene.systems['mindar-image-system']?.stop();
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+scene.addEventListener('loaded', () => {
+  sceneReady = true;
+  ready();
+});
+
+tank.addEventListener('tank-ready', () => {
+  modelReady = true;
+  ready();
+});
+
+tank.addEventListener('tank-error', event => {
+  fail(event.detail.message);
+});
+
+tank.addEventListener('model-error', () => {
+  fail(
+    '水槽載入失敗，請確認 duckweed_tank.glb ' +
+    '已使用 Upload files 上傳至同一資料夾。'
+  );
+});
+
+if (tank.dataset.tankReady === 'true') {
+  modelReady = true;
+}
+
+if (tank.dataset.tankError) {
+  fail(tank.dataset.tankError);
+}
+
+ready();
+
+scene.addEventListener('arReady', () => {
+  if (failed) return;
+
+  starting = false;
+  running = true;
+
+  start.hidden = true;
+  bottom.hidden = false;
+
+  status.textContent =
+    '請對準完整圖卡，辨識後拖動水位滑桿。';
+});
+
+scene.addEventListener('arError', () => {
+  fail(
+    '無法啟動鏡頭，請確認相機權限，' +
+    '以及 targets.mind 是否存在。'
+  );
+});
+
+start.addEventListener('click', async () => {
+  if (
+    failed ||
+    starting ||
+    running ||
+    !modelReady ||
+    !sceneReady
+  ) {
+    return;
+  }
+
+  if (
+    !window.isSecureContext ||
+    !navigator.mediaDevices?.getUserMedia
+  ) {
+    status.textContent =
+      '請使用手機瀏覽器開啟 HTTPS 網址，' +
+      '並允許相機權限。';
+
+    return;
+  }
+
+  starting = true;
+  start.disabled = true;
+  start.textContent = '啟動中';
+
+  status.textContent = '請允許網站使用相機……';
+
+  try {
+    await scene.systems['mindar-image-system'].start();
+
+  } catch (error) {
+    console.error(error);
+
+    fail(
+      'AR 啟動失敗：請允許相機權限，' +
+      '並確認 targets.mind 已上傳。'
+    );
+  }
+});
+
+document.querySelector('#target')
+  .addEventListener('targetFound', () => {
+    if (!failed) {
+      status.textContent =
+        '辨識成功！改變水位，' +
+        '觀察浮萍與水面的相對位置。';
+    }
+  });
+
+document.querySelector('#target')
+  .addEventListener('targetLost', () => {
+    if (running) {
+      status.textContent =
+        '圖卡離開鏡頭，請重新對準圖卡。';
+    }
+  });
+
+function setLevel(percent) {
+  const p = Math.max(
+    0,
+    Math.min(100, Number(percent))
+  );
+
+  level.value = p;
+  value.textContent = p + '%';
+
+  tank.components['tank-interaction']?.setLevel(p);
+
+  if (p < 34) {
+    result.textContent =
+      '低水位：浮萍隨水面下降，根仍垂在水中。';
+
+  } else if (p > 66) {
+    result.textContent =
+      '高水位：浮萍隨水面上升，仍漂浮在水面。';
+
+  } else {
+    result.textContent =
+      '中水位：浮萍位在水面，根沒有固定在槽底。';
+  }
+}
+
+level.addEventListener('input', event => {
+  setLevel(event.target.value);
+});
+
+document.querySelectorAll('[data-level]')
+  .forEach(button => {
+    button.addEventListener('click', () => {
+      setLevel(button.dataset.level);
+    });
+  });
+
+document.querySelector('#rotate')
+  .addEventListener('click', () => {
+    angle = (angle + 30) % 360;
+
+    document.querySelector('#spin').setAttribute(
+      'rotation',
+      `0 0 ${angle}`
+    );
+  });
+
+document.querySelector('#view')
+  .addEventListener('click', () => {
+    viewIndex = (viewIndex + 1) % views.length;
+
+    document.querySelector('#tilt').setAttribute(
+      'rotation',
+      `${views[viewIndex]} 0 0`
+    );
+  });
+
+document.querySelector('#reset')
+  .addEventListener('click', () => {
+    angle = 0;
+    viewIndex = 0;
+
+    setLevel(50);
+
+    document.querySelector('#spin').setAttribute(
+      'rotation',
+      '0 0 0'
+    );
+
+    document.querySelector('#tilt').setAttribute(
+      'rotation',
+      '70 0 0'
+    );
+  });
+
+window.addEventListener('pagehide', () => {
+  try {
+    scene.systems['mindar-image-system']?.stop();
+
+  } catch (error) {
+    console.warn(error);
+  }
+});
+</script>
+
+</body>
+</html>
